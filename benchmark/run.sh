@@ -15,6 +15,8 @@
 # The script is idempotent — re-running overwrites the JSON files. The
 # Python aggregator (results/aggregate.py) reads all summaries and emits
 # the final table for the LinkedIn post.
+#
+# Kept compatible with macOS's bundled bash 3.2 — no associative arrays.
 
 set -euo pipefail
 
@@ -22,25 +24,29 @@ cd "$(dirname "$0")"
 RESULTS=results
 mkdir -p "$RESULTS"
 
-declare -A BASE=(
-  [flask]="http://localhost:5001"
-  [fastapi]="http://localhost:8000"
-)
+base_url_for() {
+  case "$1" in
+    flask)   echo "http://localhost:5001" ;;
+    fastapi) echo "http://localhost:8000" ;;
+    *) echo "unknown framework: $1" >&2; exit 1 ;;
+  esac
+}
 
-WORKLOADS=(read mixed fanout)
+FRAMEWORKS="flask fastapi"
+WORKLOADS="read mixed fanout"
 RUNS=3
 
-for fw in flask fastapi; do
-  for w in "${WORKLOADS[@]}"; do
+for fw in $FRAMEWORKS; do
+  base=$(base_url_for "$fw")
+  for w in $WORKLOADS; do
     for r in $(seq 1 $RUNS); do
       out="$RESULTS/${fw}-${w}-r${r}.json"
       echo
       echo "▶ ${fw}  ${w}  run ${r}/${RUNS}  →  ${out}"
       k6 run \
-        -e BASE="${BASE[$fw]}" \
+        -e BASE="$base" \
         --summary-export "$out" \
         "k6/${w}.js"
-      # Cool-down so connections drain between runs
       sleep 5
     done
   done

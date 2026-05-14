@@ -36,9 +36,15 @@ def load_summaries() -> dict[tuple[str, str], list[dict]]:
 
 
 def metric(summary: dict, name: str, agg: str) -> float | None:
-    """Pull a specific aggregate out of k6's `metrics` block."""
+    """Pull a specific aggregate out of k6's `metrics` block.
+
+    k6 v2.0 emits flat metric dicts: {avg, min, med, max, p(90), p(95), count, rate}.
+    Older versions nested under "values". We probe both.
+    """
     m = summary.get("metrics", {}).get(name) or {}
-    val = m.get("values", {}).get(agg)
+    if isinstance(m.get("values"), dict):
+        m = m["values"]
+    val = m.get(agg)
     return float(val) if val is not None else None
 
 
@@ -60,13 +66,15 @@ def main() -> int:
             "workload": wl,
             "runs": len(runs),
             "rps_median": median_across_runs(runs, "http_reqs", "rate"),
-            "client_p50_ms": median_across_runs(runs, "http_req_duration", "p(50)"),
+            # k6 v2.0 exports `med` (= p50) and `p(90)`, `p(95)` but no p(99) by
+            # default — use what's available.
+            "client_p50_ms": median_across_runs(runs, "http_req_duration", "med"),
+            "client_p90_ms": median_across_runs(runs, "http_req_duration", "p(90)"),
             "client_p95_ms": median_across_runs(runs, "http_req_duration", "p(95)"),
-            "client_p99_ms": median_across_runs(runs, "http_req_duration", "p(99)"),
-            "server_p50_ms": median_across_runs(runs, "server_time_ms", "p(50)"),
+            "server_p50_ms": median_across_runs(runs, "server_time_ms", "med"),
+            "server_p90_ms": median_across_runs(runs, "server_time_ms", "p(90)"),
             "server_p95_ms": median_across_runs(runs, "server_time_ms", "p(95)"),
-            "server_p99_ms": median_across_runs(runs, "server_time_ms", "p(99)"),
-            "errors_pct": median_across_runs(runs, "http_req_failed", "rate"),
+            "errors_pct": median_across_runs(runs, "http_req_failed", "value"),
         })
 
     # CSV
@@ -100,11 +108,11 @@ def main() -> int:
             for label, key, suffix in [
                 ("Throughput (req/s)", "rps_median", ""),
                 ("Client p50 (ms)", "client_p50_ms", ""),
+                ("Client p90 (ms)", "client_p90_ms", ""),
                 ("Client p95 (ms)", "client_p95_ms", ""),
-                ("Client p99 (ms)", "client_p99_ms", ""),
                 ("Server p50 (ms)", "server_p50_ms", ""),
+                ("Server p90 (ms)", "server_p90_ms", ""),
                 ("Server p95 (ms)", "server_p95_ms", ""),
-                ("Server p99 (ms)", "server_p99_ms", ""),
                 ("Error rate", "errors_pct", ""),
             ]:
                 f.write(
