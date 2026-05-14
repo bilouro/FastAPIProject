@@ -18,9 +18,12 @@
 [Architecture](#architecture) ·
 [Configuration](#configuration) ·
 [Testing](#testing) ·
+[Benchmark vs Flask](#benchmark-vs-flask) ·
 [Roadmap](#roadmap)
 
 </div>
+
+> **Mirror project:** [`bilouro/FlaskProject`](https://github.com/bilouro/FlaskProject) — same domain, same contract, sync edition. Use the [benchmark harness](#benchmark-vs-flask) in this repo to compare both side by side under controlled load.
 
 ---
 
@@ -61,6 +64,7 @@ It started life as the [FlaskProject](https://github.com/bilouro/FlaskProject) t
 - [Testing](#testing)
 - [Observability](#observability)
 - [Performance & Concurrency](#performance--concurrency)
+- [Benchmark vs Flask](#benchmark-vs-flask)
 - [Roadmap](#roadmap)
 - [Contributing](#contributing)
 - [Security](#security)
@@ -399,6 +403,63 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
 
 ---
 
+## Benchmark vs Flask
+
+This repo ships a **side-by-side load benchmark** comparing this FastAPI service against its [Flask twin](https://github.com/bilouro/FlaskProject) under controlled identical conditions: same Postgres, same schema, same Docker host, equal CPU budgets.
+
+Headline finding from the I/O-fanout workload (the canonical async use case — every request triggers `pg_sleep(50ms)` server-side):
+
+| Metric | Flask (gunicorn 4w/4t) | FastAPI (uvicorn 4w) |
+|---|---:|---:|
+| Throughput (req/s) | 265 | **992** |
+| Client p50 (ms) | 905 | **226** |
+| Client p95 (ms) | 2,615 | **733** |
+
+→ **FastAPI ≈ 3.7× throughput at ~1/4 the client p50** on this workload — exactly where async is supposed to shine, and does.
+
+On read-light and mixed CRUD workloads the gap shrinks to **7-14%**. Full results, every percentile, and per-workload analysis are in [`benchmark/RESULTS.md`](benchmark/RESULTS.md).
+
+### How to run
+
+Prereqs: Docker, `k6` (e.g. `brew install k6`), Python with `psycopg2-binary` (`pip install psycopg2-binary`), and the [FlaskProject](https://github.com/bilouro/FlaskProject) repo cloned **next to this one** so docker-compose can build both contexts.
+
+```bash
+# 1. Bring up Postgres + both APIs (this side runs alembic; Flask reuses the same schema)
+docker compose -f benchmark/docker-compose-bench.yml up --build -d
+
+# 2. Wait until both health endpoints return 200
+curl -fsS http://localhost:5001/health && echo " flask ok"
+curl -fsS http://localhost:8000/health && echo " fastapi ok"
+
+# 3. Seed 10,000 books into Postgres (shared by both APIs)
+python benchmark/seed.py --count 10000 --reset
+
+# 4. Run the full sweep: 3 workloads × 2 APIs × 3 runs = 18 k6 invocations (~26 min)
+bash benchmark/run.sh
+
+# 5. Aggregate the 18 raw k6 JSONs into a CSV + markdown table
+python benchmark/results/aggregate.py
+
+# 6. Tear everything down
+docker compose -f benchmark/docker-compose-bench.yml down -v
+```
+
+### Workloads
+
+| Script              | Endpoint                              | Shape                                                        | Purpose                       |
+| ------------------- | ------------------------------------- | ------------------------------------------------------------ | ----------------------------- |
+| `benchmark/k6/read.js`   | `GET /v1/books/{random_id}`     | ramp **50 → 1000 VUs**, 90 s                                | Read-light, latency-bound     |
+| `benchmark/k6/mixed.js`  | 70 % GET / 25 % POST / 5 % PATCH | ramp **100 → 500 VUs**, 80 s                                | Realistic CRUD mix            |
+| `benchmark/k6/fanout.js` | `GET /v1/sleep?ms=50`           | ramp **50 → 500 VUs**, 80 s — the async-vs-sync stress test | I/O fanout (slow upstream)    |
+
+Every script reads the server's `X-Response-Time` header into a custom `server_time_ms` k6 trend so the final report distinguishes **client wall-clock** from **handler-only time**.
+
+### Hardware caveat
+
+The reference results were taken on an **Apple Silicon MacBook**, each container capped at **2 CPUs / 1 GB RAM** via `deploy.resources.limits`. Treat the numbers as a **relative comparison under controlled identical conditions**, not absolute production capacity.
+
+---
+
 ## Roadmap
 
 - [x] Async SQLAlchemy 2 + asyncpg
@@ -409,6 +470,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
 - [x] 100 % test coverage on `app/*`
 - [x] Multi-stage Dockerfile + docker-compose
 - [x] API versioning under `/v1`
+- [x] Side-by-side benchmark harness vs Flask
 - [ ] GitHub Actions CI (pytest + ruff + mypy)
 - [ ] Pagination (`limit` / `offset`, then keyset)
 - [ ] Filtering and full-text search on title / author
